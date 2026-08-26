@@ -1,6 +1,6 @@
 "use client";
 
-import { type FormEvent, type MouseEvent, useEffect, useMemo, useRef, useState } from "react";
+import { type FormEvent, type MouseEvent, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, BusFront, Camera, Check, CheckCircle2, Clock3, Columns2, Copy, FileText, Image as ImageIcon, Images, Layers3, ListTree, LoaderCircle, LogIn, Minus, Pencil, Plus, Printer, RotateCcw, ScanSearch, Share2, ShieldCheck, Sparkles, Trash2, Upload, Wrench, X } from "lucide-react";
 type Occurrence = {
   partNumber: string;
@@ -53,6 +53,19 @@ type Data = {
 };
 
 const normalize = (value: string) => value.trim().toUpperCase().replace(/\s+/g, "");
+/* מק״טים מגיעים מחשבוניות, מוואטסאפ ומהטלפון בכל צורה: 3747-86-00012, 3747 86 00012,
+   37478600012. הצורה הרופפת מתעלמת מכל מפריד כדי שכולן יובילו לאותו חלק. */
+const normalizeLoose = (value: string) => value.toUpperCase().replace(/[^A-Z0-9]/g, "");
+const partNumberSegments = (value: string) => value.toUpperCase().split(/[^A-Z0-9]+/).filter(Boolean);
+/* דירוג התאמת מק״ט: מדויק > קידומת > תחילת מקטע > הכלה */
+const partMatchTier = (partNumber: string, exact: string, loose: string) => {
+  const normalized = normalize(partNumber);
+  const looseNumber = normalizeLoose(partNumber);
+  if (normalized === exact || (loose.length > 0 && looseNumber === loose)) return 0;
+  if ((exact.length > 0 && normalized.startsWith(exact)) || (loose.length > 0 && looseNumber.startsWith(loose))) return 1;
+  if (loose.length > 0 && partNumberSegments(partNumber).some((segment) => segment.startsWith(loose))) return 2;
+  return 3;
+};
 const normalizeVin = (value: string) => value.toUpperCase().replace(/[^A-Z0-9]/g, "");
 const searchTokens = (value: string) => value.toUpperCase().split(/[^A-Z0-9\u0590-\u05FF\u4E00-\u9FFF]+/).filter(Boolean);
 const matchesSearch = (haystack: string, needle: string) => {
@@ -1180,6 +1193,8 @@ export default function Home() {
   const [hasSearched, setHasSearched] = useState(false);
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState("");
+  const [suggestOpen, setSuggestOpen] = useState(false);
+  const [suggestIndexActive, setSuggestIndexActive] = useState(-1);
   const [selected, setSelected] = useState<Part | null>(null);
   const [model, setModel] = useState("all");
   const [vinReturnState, setVinReturnState] = useState<VinBrowseState | null>(null);
@@ -1201,8 +1216,8 @@ export default function Home() {
         return res.json() as Promise<Data>;
       }),
       fetch("/hebrew-descriptions.json", { cache: "no-cache", signal: controller.signal })
-        .then((res) => res.ok ? res.json() as Promise<Record<string, string>> : {})
-        .catch(() => ({})),
+        .then((res) => res.ok ? res.json() as Promise<Record<string, string>> : {} as Record<string, string>)
+        .catch(() => ({} as Record<string, string>)),
     ]).then(([catalogData, hebrewDescriptions]) => {
       setData({
         ...catalogData,
@@ -1399,6 +1414,29 @@ export default function Home() {
   }, [data]);
 
   const partIndex = useMemo(() => new Map(data?.parts.map((part) => [part.partNumber, part]) ?? []), [data]);
+  /* אינדקס אחד לכל 13 אלף החלקים, נבנה פעם אחת — כדי שההצעות יתעדכנו בכל הקלדה בלי להיתקע */
+  const suggestIndex = useMemo(() => (data?.parts ?? []).map((part) => ({
+    part,
+    normalized: normalize(part.partNumber),
+    loose: normalizeLoose(part.partNumber),
+    tokens: searchTokens([
+      part.partNumber,
+      part.description,
+      part.descriptionChinese,
+      part.descriptionHebrew ?? "",
+      part.assemblies.join(" "),
+    ].join(" ")),
+  })), [data]);
+  const loosePartIndex = useMemo(() => {
+    const map = new Map<string, Part[]>();
+    data?.parts.forEach((part) => {
+      const key = normalizeLoose(part.partNumber);
+      const bucket = map.get(key);
+      if (bucket) bucket.push(part);
+      else map.set(key, [part]);
+    });
+    return map;
+  }, [data]);
   const catalogVins = useMemo(() => new Map(data?.catalogs.map((catalog) => [catalog.catalog, catalog.vinNumbers ?? []]) ?? []), [data]);
   const vinCount = useMemo(() => data?.catalogs.reduce((sum, catalog) => sum + (catalog.vinNumbers?.length ?? 0), 0) ?? 0, [data]);
   const contextualCatalog = useMemo(() => {
@@ -1424,38 +1462,100 @@ export default function Home() {
   }, [data]);
   const isHome = routeReady && mode === "part" && !hasSearched && !submitted;
 
+  useEffect(() => {
+    setSuggestOpen(false);
+    setSuggestIndexActive(-1);
+  }, [mode, submitted]);
+
+  const deferredQuery = useDeferredValue(query);
+  /* ההצעות חוצות מצבים בכוונה: מי שמקליד תיאור במצב "לפי מק״ט" עדיין מקבל תשובה */
+  const suggestions = useMemo(() => {
+    if (!suggestIndex.length || (mode !== "part" && mode !== "description")) return [];
+    const raw = deferredQuery.trim();
+    if (raw.length < 2) return [];
+    const exact = normalize(raw);
+    const loose = normalizeLoose(raw);
+    const numericQuery = loose.length >= 2 && /\d/.test(loose);
+    /* התיאורים בקטלוג באנגלית ובסינית. אותה שכבת המונחים שמשרתת את החיפוש לפי תיאור
+       מתרגמת גם כאן "מגב" ל-WIPER, כדי שהקלדה בעברית תניב הצעות. */
+    const analysis = analyzeSmartQuery(raw);
+    const ruleTermSets = analysis.rule ? analysis.rule.terms.map((term) => searchTokens(term)) : [];
+    const ruleExcludeSets = analysis.rule?.exclude?.map((term) => searchTokens(term)) ?? [];
+    const tokenSets = [searchTokens(raw), analysis.translatedTokens].filter((set) => set.length > 0);
+    const hits: { part: Part; tier: number; via: "part" | "description" }[] = [];
+    for (const entry of suggestIndex) {
+      let tier = 3;
+      if (numericQuery) {
+        if (entry.normalized === exact || entry.loose === loose) tier = 0;
+        else if (entry.normalized.startsWith(exact) || entry.loose.startsWith(loose)) tier = 1;
+        else if (entry.loose.includes(loose)) tier = 2;
+      }
+      if (tier < 3) { hits.push({ part: entry.part, tier, via: "part" }); continue; }
+      const covers = (set: string[]) => set.every((token) => entry.tokens.some((item) => item.includes(token)));
+      if (ruleExcludeSets.some(covers)) continue;
+      const textTier = tokenSets.findIndex(covers);
+      if (textTier >= 0) { hits.push({ part: entry.part, tier: 4 + textTier, via: "description" }); continue; }
+      if (ruleTermSets.some(covers)) hits.push({ part: entry.part, tier: 6, via: "description" });
+    }
+    return hits
+      .sort((left, right) => left.tier - right.tier
+        || left.part.partNumber.length - right.part.partNumber.length
+        || left.part.partNumber.localeCompare(right.part.partNumber))
+      .slice(0, 8);
+  }, [suggestIndex, deferredQuery, mode]);
+  const suggestionsReady = suggestOpen && suggestions.length > 0 && !submitted;
+
   const rankedResults = useMemo(() => {
-    if (!data || !submitted || (mode !== "part" && mode !== "description")) return { analysis: null as SmartQueryAnalysis | null, ranked: [] as NonNullable<ReturnType<typeof rankSmartPart>>[] };
+    if (!data || !submitted || (mode !== "part" && mode !== "description")) return { analysis: null as SmartQueryAnalysis | null, ranked: [] as NonNullable<ReturnType<typeof rankSmartPart>>[], fellBackToDescription: false };
     const scopedParts = data.parts.filter((part) => model === "all" || part.models.includes(model));
     if (mode === "description") {
       const smart = rankSmartParts(scopedParts, submitted);
-      return { analysis: smart.analysis, ranked: smart.ranked.slice(0, 50) };
+      return { analysis: smart.analysis, ranked: smart.ranked.slice(0, 50), fellBackToDescription: false };
     }
     const q = normalize(submitted);
+    const loose = normalizeLoose(submitted);
     const analysis = analyzeSmartQuery(submitted);
+    const TIER_META = [
+      { score: 140, confidence: "strong" as const, he: "מק״ט מדויק", en: "Exact part number" },
+      { score: 118, confidence: "strong" as const, he: "מתחיל במק״ט שחיפשת", en: "Starts with your part number" },
+      { score: 96, confidence: "good" as const, he: "מקטע במק״ט מתחיל בערך שחיפשת", en: "A part-number segment starts with your value" },
+      { score: 78, confidence: "good" as const, he: "התאמה למק״ט חלקי", en: "Partial part-number match" },
+    ];
     const ranked = scopedParts
-      .filter((part) => normalize(part.partNumber).includes(q))
-      .sort((left, right) => {
-        const exactLeft = normalize(left.partNumber) === q ? 0 : 1;
-        const exactRight = normalize(right.partNumber) === q ? 0 : 1;
-        return exactLeft - exactRight || left.partNumber.localeCompare(right.partNumber);
+      .flatMap((part) => {
+        const tier = partMatchTier(part.partNumber, q, loose);
+        if (tier === 3
+          && !(q.length > 0 && normalize(part.partNumber).includes(q))
+          && !(loose.length > 0 && normalizeLoose(part.partNumber).includes(loose))) return [];
+        return [{ part, tier }];
       })
+      .sort((left, right) => left.tier - right.tier
+        || left.part.partNumber.length - right.part.partNumber.length
+        || left.part.partNumber.localeCompare(right.part.partNumber))
       .slice(0, 50)
-      .map((part) => {
-        const exact = normalize(part.partNumber) === q;
+      .map(({ part, tier }) => {
+        const meta = TIER_META[tier];
         const match: SmartMatch = {
-          score: exact ? 140 : 88,
-          confidence: exact ? "strong" : "good",
-          reasonHe: exact ? "מק״ט מדויק" : "התאמה למק״ט חלקי",
-          reasonEn: exact ? "Exact part number" : "Partial part-number match",
-          detailsHe: [exact ? "מק״ט מדויק" : "התאמה למק״ט חלקי"],
-          detailsEn: [exact ? "Exact part number" : "Partial part-number match"],
+          score: meta.score,
+          confidence: meta.confidence,
+          reasonHe: meta.he,
+          reasonEn: meta.en,
+          detailsHe: [meta.he],
+          detailsEn: [meta.en],
           understoodHe: submitted,
           understoodEn: submitted,
         };
         return { part, occurrence: part.occurrences.find((item) => item.position) ?? part.occurrences[0], occurrenceCount: part.occurrences.length, match };
       });
-    return { analysis, ranked };
+    /* מי שהקליד תיאור בזמן שמצב "לפי מק״ט" פעיל קיבל עד כה מסך ריק.
+       במקום זה מריצים את אותו הטקסט דרך דירוג התיאורים ומודיעים על כך. */
+    if (!ranked.length) {
+      const smart = rankSmartParts(scopedParts, submitted);
+      if (smart.ranked.length) {
+        return { analysis: smart.analysis, ranked: smart.ranked.slice(0, 50), fellBackToDescription: true };
+      }
+    }
+    return { analysis, ranked, fellBackToDescription: false };
   }, [data, submitted, model, mode]);
   const results = useMemo(() => rankedResults.ranked.map((result) => result.part), [rankedResults]);
   const resultMatchByPart = useMemo(() => new Map(rankedResults.ranked.map((result) => [result.part.partNumber, result.match])), [rankedResults]);
@@ -1495,7 +1595,10 @@ export default function Home() {
 
     if (searchTimerRef.current !== null) window.clearTimeout(searchTimerRef.current);
     const cleanValue = mode === "vin" ? normalizeVin(value) : value.trim();
-    const exactPart = mode === "part" ? partIndex.get(cleanValue.toUpperCase()) : undefined;
+    const looseCandidates = mode === "part" ? loosePartIndex.get(normalizeLoose(cleanValue)) ?? [] : [];
+    const exactPart = mode === "part"
+      ? partIndex.get(cleanValue.toUpperCase()) ?? (looseCandidates.length === 1 ? looseCandidates[0] : undefined)
+      : undefined;
     setSearchError("");
     setSearchLoading(true);
     setHasSearched(true);
@@ -1541,6 +1644,26 @@ export default function Home() {
         appUrl(`/search/${searchMode}`, language, { q: cleanValue }),
       );
     }, 180);
+  };
+
+  const openSuggestion = (part: Part) => {
+    if (searchTimerRef.current !== null) window.clearTimeout(searchTimerRef.current);
+    searchTimerRef.current = null;
+    setSuggestOpen(false);
+    setSuggestIndexActive(-1);
+    setSearchError("");
+    setSearchLoading(false);
+    setHasSearched(true);
+    setMode("part");
+    setQuery(part.partNumber);
+    setSubmitted(part.partNumber);
+    setSelected(null);
+    setModel("all");
+    window.history.pushState(
+      { ztCatalogView: "part", partNumber: part.partNumber } satisfies CatalogHistoryState,
+      "",
+      appUrl(`/part/${encodeURIComponent(part.partNumber)}`, language),
+    );
   };
 
   const clearSearch = () => {
@@ -1921,7 +2044,8 @@ export default function Home() {
                 <span aria-hidden="true">☷</span>{he ? "שיטוט" : "Browse"}
               </button>
             </div>
-            {mode !== "browse" && <form className="searchBox" onSubmit={(e) => { e.preventDefault(); search(); }}>
+            {mode !== "browse" && <div className="searchBoxShell">
+            <form className="searchBox" onSubmit={(e) => { e.preventDefault(); setSuggestOpen(false); search(); }}>
               <label htmlFor="catalog-search">{mode === "vin"
                 ? (he ? "מספר שלדה (VIN)" : "VIN")
                 : mode === "description"
@@ -1930,7 +2054,42 @@ export default function Home() {
               <input
                 id="catalog-search"
                 value={query}
-                onChange={(e) => setQuery(mode === "vin" ? normalizeVin(e.target.value) : e.target.value)}
+                onChange={(e) => {
+                  setQuery(mode === "vin" ? normalizeVin(e.target.value) : e.target.value);
+                  setSuggestOpen(true);
+                  setSuggestIndexActive(-1);
+                }}
+                onFocus={() => setSuggestOpen(true)}
+                onBlur={() => window.setTimeout(() => setSuggestOpen(false), 140)}
+                onKeyDown={(event) => {
+                  if (!suggestionsReady) return;
+                  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                    event.preventDefault();
+                    const step = event.key === "ArrowDown" ? 1 : -1;
+                    setSuggestIndexActive((current) => {
+                      const next = current + step;
+                      if (next < 0) return suggestions.length - 1;
+                      if (next >= suggestions.length) return 0;
+                      return next;
+                    });
+                    return;
+                  }
+                  if (event.key === "Enter" && suggestIndexActive >= 0) {
+                    event.preventDefault();
+                    openSuggestion(suggestions[suggestIndexActive].part);
+                    return;
+                  }
+                  if (event.key === "Escape") {
+                    event.preventDefault();
+                    setSuggestOpen(false);
+                    setSuggestIndexActive(-1);
+                  }
+                }}
+                role="combobox"
+                aria-expanded={suggestionsReady}
+                aria-controls="catalog-search-suggestions"
+                aria-autocomplete="list"
+                aria-activedescendant={suggestIndexActive >= 0 ? `catalog-suggestion-${suggestIndexActive}` : undefined}
                 placeholder={mode === "vin"
                   ? (he ? "17 תווים ללא רווחים" : "17 characters, no spaces")
                   : mode === "description"
@@ -1957,7 +2116,37 @@ export default function Home() {
                 </button>
                 <button type="submit" className="submitSearch"><span aria-hidden="true">⌕</span>{he ? "חיפוש" : "Search"}</button>
               </div>
-            </form>}
+            </form>
+            {suggestionsReady && <div className="searchSuggestions" id="catalog-search-suggestions" role="listbox" aria-label={he ? "הצעות חיפוש" : "Search suggestions"}>
+              <div className="searchSuggestionsHead">
+                <span>{he ? "התאמות מיידיות" : "Instant matches"}</span>
+                <span>{he ? "↑↓ מעבר · ↵ פתיחה · Esc סגירה" : "↑↓ move · ↵ open · Esc close"}</span>
+              </div>
+              {suggestions.map((item, index) => (
+                <button
+                  type="button"
+                  key={item.part.partNumber}
+                  id={`catalog-suggestion-${index}`}
+                  role="option"
+                  aria-selected={index === suggestIndexActive}
+                  className={index === suggestIndexActive ? "searchSuggestion active" : "searchSuggestion"}
+                  onMouseEnter={() => setSuggestIndexActive(index)}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => openSuggestion(item.part)}
+                >
+                  <span className="searchSuggestionNumber" dir="ltr">{item.part.partNumber}</span>
+                  <span className={item.via === "part" ? "searchSuggestionTag part" : "searchSuggestionTag"}>
+                    {item.via === "part" ? (he ? "מק״ט" : "Part no.") : (he ? "תיאור" : "Description")}
+                  </span>
+                  <span className="searchSuggestionText">{displayPartDescription(item.part, he, item.part.partNumber)}</span>
+                  <span className="searchSuggestionMeta">
+                    {item.part.models.slice(0, 2).join(" · ") || (he ? "ללא דגם" : "No model")}
+                    {item.part.occurrences.length > 1 ? ` · ${item.part.occurrences.length}${he ? " מכלולים" : " assemblies"}` : ""}
+                  </span>
+                </button>
+              ))}
+            </div>}
+            </div>}
             {mode !== "browse" && <div className={searchError ? "searchFieldFeedback error" : "searchFieldFeedback"}>
               <span id="catalog-search-hint">{searchHint}</span>
               {searchError && <strong role="alert"><AlertCircle size={14} aria-hidden="true" />{searchError}</strong>}
@@ -2052,7 +2241,17 @@ export default function Home() {
 
           {(mode === "part" || mode === "description") && submitted && !searchLoading && !dataLoading && !dataLoadError && (
             <>
-            {mode === "description" && rankedResults.analysis && <section className="smartSearchSummary" aria-live="polite">
+            {rankedResults.fellBackToDescription && <section className="searchFallbackNotice" role="status">
+              <AlertCircle size={17} aria-hidden="true" />
+              <div>
+                <strong>{he ? "לא נמצא מק״ט תואם — חיפשנו לפי תיאור" : "No matching part number — we searched by description"}</strong>
+                <span>{he
+                  ? `«${submitted}» אינו מק״ט בקטלוג, אז הצגנו את החלקים שהתיאור שלהם מתאים.`
+                  : `“${submitted}” is not a catalog part number, so we show parts whose description matches.`}</span>
+              </div>
+              <button type="button" onClick={() => changeMode("description")}>{he ? "מעבר לחיפוש לפי תיאור" : "Switch to description search"}</button>
+            </section>}
+            {(mode === "description" || rankedResults.fellBackToDescription) && rankedResults.analysis && <section className="smartSearchSummary" aria-live="polite">
               <span className="smartSearchSummaryIcon" aria-hidden="true"><Sparkles size={18} /></span>
               <div>
                 <span>{he ? "כך הבנתי את החיפוש" : "How I understood the search"}</span>
