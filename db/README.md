@@ -55,3 +55,14 @@ npx wrangler d1 execute DB --local --persist-to .wrangler/state --file /tmp/seed
 
 `db/index.ts` קורא את הבינדינג מתוך `globalThis.__ZT_SITE_ENV__` ולא מ-`cloudflare:workers`;
 לייבוא הסטטי של המודול הזה אין מימוש ב-Node והוא מפיל את שלב ה-prerender של `vinext build`.
+
+## סדר ההרצה אחרי ייבוא קטלוג
+
+```bash
+python3 scripts/import_catalog_update.py --source-dir ./catalogs --dry-run   # מה עומד להשתנות
+python3 scripts/import_catalog_update.py --source-dir ./catalogs             # ייבוא
+node scripts/translate_descriptions.mjs                                      # תיאורים בעברית לחלקים החדשים
+node scripts/seed_d1.mjs > /tmp/seed.sql && npx wrangler d1 execute DB --file /tmp/seed.sql
+```
+
+התרגום לפני הזריעה, כדי שהתיאורים בעברית ייכנסו ל-`haystack` שעליו רץ החיפוש.
