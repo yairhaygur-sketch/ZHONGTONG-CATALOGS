@@ -56,6 +56,7 @@ const normalize = (value: string) => value.trim().toUpperCase().replace(/\s+/g, 
 /* מק״טים מגיעים מחשבוניות, מוואטסאפ ומהטלפון בכל צורה: 3747-86-00012, 3747 86 00012,
    37478600012. הצורה הרופפת מתעלמת מכל מפריד כדי שכולן יובילו לאותו חלק. */
 const normalizeLoose = (value: string) => value.toUpperCase().replace(/[^A-Z0-9]/g, "");
+const SUGGESTION_LIMIT = 8;
 const partNumberSegments = (value: string) => value.toUpperCase().split(/[^A-Z0-9]+/).filter(Boolean);
 /* דירוג התאמת מק״ט: מדויק > קידומת > תחילת מקטע > הכלה */
 const partMatchTier = (partNumber: string, exact: string, loose: string) => {
@@ -1465,9 +1466,10 @@ export default function Home() {
   const deferredQuery = useDeferredValue(query);
   /* ההצעות חוצות מצבים בכוונה: מי שמקליד תיאור במצב "לפי מק״ט" עדיין מקבל תשובה */
   const suggestions = useMemo(() => {
-    if (!suggestIndex.length || (mode !== "part" && mode !== "description")) return [];
+    const empty = { items: [] as { part: Part; tier: number; via: "part" | "description" }[], total: 0 };
+    if (!suggestIndex.length || (mode !== "part" && mode !== "description")) return empty;
     const raw = deferredQuery.trim();
-    if (raw.length < 2) return [];
+    if (raw.length < 2) return empty;
     const exact = normalize(raw);
     const loose = normalizeLoose(raw);
     const numericQuery = loose.length >= 2 && /\d/.test(loose);
@@ -1492,13 +1494,12 @@ export default function Home() {
       if (textTier >= 0) { hits.push({ part: entry.part, tier: 4 + textTier, via: "description" }); continue; }
       if (ruleTermSets.some(covers)) hits.push({ part: entry.part, tier: 6, via: "description" });
     }
-    return hits
-      .sort((left, right) => left.tier - right.tier
-        || left.part.partNumber.length - right.part.partNumber.length
-        || left.part.partNumber.localeCompare(right.part.partNumber))
-      .slice(0, 8);
+    hits.sort((left, right) => left.tier - right.tier
+      || left.part.partNumber.length - right.part.partNumber.length
+      || left.part.partNumber.localeCompare(right.part.partNumber));
+    return { items: hits.slice(0, SUGGESTION_LIMIT), total: hits.length };
   }, [suggestIndex, deferredQuery, mode]);
-  const suggestionsReady = suggestOpen && suggestions.length > 0 && !submitted;
+  const suggestionsReady = suggestOpen && suggestions.items.length > 0 && !submitted;
 
   const rankedResults = useMemo(() => {
     if (!data || !submitted || (mode !== "part" && mode !== "description")) return { analysis: null as SmartQueryAnalysis | null, ranked: [] as NonNullable<ReturnType<typeof rankSmartPart>>[], fellBackToDescription: false };
@@ -2065,15 +2066,15 @@ export default function Home() {
                     const step = event.key === "ArrowDown" ? 1 : -1;
                     setSuggestIndexActive((current) => {
                       const next = current + step;
-                      if (next < 0) return suggestions.length - 1;
-                      if (next >= suggestions.length) return 0;
+                      if (next < 0) return suggestions.items.length - 1;
+                      if (next >= suggestions.items.length) return 0;
                       return next;
                     });
                     return;
                   }
                   if (event.key === "Enter" && suggestIndexActive >= 0) {
                     event.preventDefault();
-                    openSuggestion(suggestions[suggestIndexActive].part);
+                    openSuggestion(suggestions.items[suggestIndexActive].part);
                     return;
                   }
                   if (event.key === "Escape") {
@@ -2119,7 +2120,7 @@ export default function Home() {
                 <span>{he ? "התאמות מיידיות" : "Instant matches"}</span>
                 <span>{he ? "↑↓ מעבר · ↵ פתיחה · Esc סגירה" : "↑↓ move · ↵ open · Esc close"}</span>
               </div>
-              {suggestions.map((item, index) => (
+              {suggestions.items.map((item, index) => (
                 <button
                   type="button"
                   key={item.part.partNumber}
@@ -2127,7 +2128,6 @@ export default function Home() {
                   role="option"
                   aria-selected={index === suggestIndexActive}
                   className={index === suggestIndexActive ? "searchSuggestion active" : "searchSuggestion"}
-                  onMouseEnter={() => setSuggestIndexActive(index)}
                   onMouseDown={(event) => event.preventDefault()}
                   onClick={() => openSuggestion(item.part)}
                 >
@@ -2142,6 +2142,17 @@ export default function Home() {
                   </span>
                 </button>
               ))}
+              {suggestions.total > suggestions.items.length && <button
+                type="button"
+                className="searchSuggestionsMore"
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => search()}
+              >
+                <span>{he
+                  ? `עוד ${(suggestions.total - suggestions.items.length).toLocaleString("he-IL")} התאמות`
+                  : `${(suggestions.total - suggestions.items.length).toLocaleString("en-US")} more matches`}</span>
+                <span>{he ? "↵ לרשימה המלאה" : "↵ for the full list"}</span>
+              </button>}
             </div>}
             </div>}
             {mode !== "browse" && <div className={searchError ? "searchFieldFeedback error" : "searchFieldFeedback"}>

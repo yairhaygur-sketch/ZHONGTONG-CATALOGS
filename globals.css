@@ -8666,3 +8666,12 @@ main[dir="rtl"] .browsePartRow.selected { box-shadow: inset -4px 0 var(--catalog
   .searchFallbackNotice { flex-wrap: wrap; }
   .searchFallbackNotice button { width: 100%; }
 }
+
+/* ---- שורת "עוד התאמות" בתחתית חלונית ההצעות ---- */
+.searchSuggestionsMore {
+  width: 100%; display: flex; justify-content: space-between; gap: 12px; align-items: center;
+  padding: 9px 16px; border: 0; border-top: 1px solid var(--catalog-border, #e3e7ea);
+  background: #f3f6f8; color: #556772; font-size: 11.5px; font-weight: 700; cursor: pointer;
+  text-align: start;
+}
+.searchSuggestionsMore:hover { background: #e9f2f6; color: var(--catalog-navy, #10384e); }
