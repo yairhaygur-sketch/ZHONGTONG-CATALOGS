@@ -6,6 +6,8 @@ interface Env {
   ASSETS: Fetcher;
   DB: D1Database;
   BUCKET: R2Bucket;
+  /** Secret for the catalog assistant. Never reaches the browser. */
+  ANTHROPIC_API_KEY?: string;
   IMAGES: {
     input(stream: ReadableStream): {
       transform(options: Record<string, unknown>): {
@@ -17,7 +19,7 @@ interface Env {
 
 declare global {
   // Runtime bindings are attached before the app router handles each request.
-  var __ZT_SITE_ENV__: Pick<Env, "BUCKET" | "DB"> | undefined;
+  var __ZT_SITE_ENV__: Pick<Env, "BUCKET" | "DB" | "ANTHROPIC_API_KEY"> | undefined;
 }
 
 interface ExecutionContext {
