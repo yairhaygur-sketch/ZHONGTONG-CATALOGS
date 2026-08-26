@@ -1462,11 +1462,6 @@ export default function Home() {
   }, [data]);
   const isHome = routeReady && mode === "part" && !hasSearched && !submitted;
 
-  useEffect(() => {
-    setSuggestOpen(false);
-    setSuggestIndexActive(-1);
-  }, [mode, submitted]);
-
   const deferredQuery = useDeferredValue(query);
   /* ההצעות חוצות מצבים בכוונה: מי שמקליד תיאור במצב "לפי מק״ט" עדיין מקבל תשובה */
   const suggestions = useMemo(() => {
@@ -1594,6 +1589,8 @@ export default function Home() {
     }
 
     if (searchTimerRef.current !== null) window.clearTimeout(searchTimerRef.current);
+    setSuggestOpen(false);
+    setSuggestIndexActive(-1);
     const cleanValue = mode === "vin" ? normalizeVin(value) : value.trim();
     const looseCandidates = mode === "part" ? loosePartIndex.get(normalizeLoose(cleanValue)) ?? [] : [];
     const exactPart = mode === "part"
@@ -2045,7 +2042,7 @@ export default function Home() {
               </button>
             </div>
             {mode !== "browse" && <div className="searchBoxShell">
-            <form className="searchBox" onSubmit={(e) => { e.preventDefault(); setSuggestOpen(false); search(); }}>
+            <form className="searchBox" onSubmit={(e) => { e.preventDefault(); search(); }}>
               <label htmlFor="catalog-search">{mode === "vin"
                 ? (he ? "מספר שלדה (VIN)" : "VIN")
                 : mode === "description"
